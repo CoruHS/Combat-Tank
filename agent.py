@@ -15,7 +15,7 @@ class DQNAgent:
     DQN with CNN:
       - Q-network + target-network
       - MSE TD loss
-      - epsilon-greedy policy
+      - epsilon-greedy policy with built-in epsilon decay
     """
 
     def __init__(
@@ -26,11 +26,20 @@ class DQNAgent:
         gamma: float = 0.99,
         lr: float = 1e-4,
         target_update_freq: int = 1000,
+        epsilon_start: float = 1.0,
+        epsilon_end: float = 0.01,
+        epsilon_decay_steps: int =  1800000,
     ):
         self.device = device
         self.num_actions = num_actions
         self.gamma = gamma
         self.target_update_freq = target_update_freq
+
+        # ---- Epsilon schedule ----
+        self.epsilon_start = epsilon_start
+        self.epsilon_end = epsilon_end
+        self.epsilon_decay_steps = epsilon_decay_steps
+        self.epsilon = epsilon_start  # current epsilon
 
         in_channels = obs_shape[0]  # (C, H, W)
         self.q_net = SimpleDQNCNN(in_channels, num_actions).to(device)
@@ -42,11 +51,20 @@ class DQNAgent:
         self.train_steps = 0
         self.max_grad_norm = 10.0
 
-    def select_action(self, obs: np.ndarray, epsilon: float) -> int:
+    def update_epsilon(self, global_step: int) -> None:
+        """
+        Linearly decay epsilon from epsilon_start to epsilon_end
+        over epsilon_decay_steps steps, then keep it at epsilon_end.
+        """
+        frac = min(1.0, global_step / float(self.epsilon_decay_steps))
+        self.epsilon = self.epsilon_start + frac * (self.epsilon_end - self.epsilon_start)
+
+    def select_action(self, obs: np.ndarray) -> int:
         """
         obs: (C, H, W) numpy array in [0, 1].
+        Uses self.epsilon for epsilon-greedy.
         """
-        if random.random() < epsilon:
+        if random.random() < self.epsilon:
             return random.randrange(self.num_actions)
 
         obs_t = torch.from_numpy(obs).unsqueeze(0).to(self.device)  # (1, C, H, W)
