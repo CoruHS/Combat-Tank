@@ -1,55 +1,50 @@
+# ppo/test.py
+"""
+Play against your trained PPO model.
+
+Usage:
+    python -m ppo.test
+    python -m ppo.test --weights ppo_tank_best_score.pth
+
+Controls:
+    Movement: Arrow keys or WASD
+    Fire: SPACE
+    Quit: ESC
+"""
 import sys
+import os
+import argparse
+
 import numpy as np
 import pygame
 import torch
-import cv2  # pip install opencv-python
+import cv2
+
+# Add parent directory to path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from pettingzoo.atari import combat_tank_v2
-from model import SimpleDQNCNN
+from ppo.model import ActorCritic
 
-WEIGHTS_PATH = "cnn_dqn_combat_tank_single_agent_shaped.pth"
-SCALE = 4        # how big the game window is (4x original size)
-STACK_SIZE = 4   # must match training
+SCALE = 4        # Window scale (4x original size)
+STACK_SIZE = 4   # Must match training
 
 
 def preprocess_obs(frame: np.ndarray) -> np.ndarray:
-    """
-    Same preprocessing as training:
-    RGB (H, W, 3) -> grayscale 84x84 -> (1, 84, 84) float32 in [0, 1]
-    """
+    """RGB (H, W, 3) -> grayscale (1, 84, 84) in [0, 1]."""
     gray = frame.mean(axis=2).astype(np.float32) / 255.0
     resized = cv2.resize(gray, (84, 84), interpolation=cv2.INTER_AREA)
-    obs_chw = resized[np.newaxis, :, :]  # (1, 84, 84)
-    return obs_chw.astype(np.float32)
+    return resized[np.newaxis, :, :].astype(np.float32)
 
 
 def get_human_action():
     """
-    Map keyboard input to Combat Tank full_action_space indices.
+    Map keyboard to Combat Tank actions.
 
-    Controls:
-      Movement:  Arrow keys OR WASD
-      Fire:      SPACE
-
-    Action mapping (approx Atari full_action_space for Combat):
-      0: NOOP
-      1: FIRE
-      2: UP
-      3: RIGHT
-      4: LEFT
-      5: DOWN
-      6: UPRIGHT
-      7: UPLEFT
-      8: DOWNRIGHT
-      9: DOWNLEFT
-      10: FIRE_UP
-      11: FIRE_RIGHT
-      12: FIRE_LEFT
-      13: FIRE_DOWN
-      14: FIRE_UPRIGHT
-      15: FIRE_UPLEFT
-      16: FIRE_DOWNRIGHT
-      17: FIRE_DOWNLEFT
+    Actions:
+      0: NOOP, 1: FIRE, 2: UP, 3: RIGHT, 4: LEFT, 5: DOWN
+      6: UPRIGHT, 7: UPLEFT, 8: DOWNRIGHT, 9: DOWNLEFT
+      10-17: FIRE + direction
     """
     keys = pygame.key.get_pressed()
 
@@ -59,159 +54,167 @@ def get_human_action():
     right = keys[pygame.K_RIGHT] or keys[pygame.K_d]
     fire = keys[pygame.K_SPACE]
 
-    # No input -> NOOP
     if not (up or down or left or right or fire):
-        return 0
+        return 0  # NOOP
 
     up_only = up and not down
     down_only = down and not up
     left_only = left and not right
     right_only = right and not left
 
-    # Fire controls
     if fire:
+        if up_only and right_only:
+            return 14  # FIRE_UPRIGHT
+        if up_only and left_only:
+            return 15  # FIRE_UPLEFT
         if up_only:
-            if right_only:
-                return 14  # FIRE_UPRIGHT
-            if left_only:
-                return 15  # FIRE_UPLEFT
-            return 10      # FIRE_UP
-
+            return 10  # FIRE_UP
+        if down_only and right_only:
+            return 16  # FIRE_DOWNRIGHT
+        if down_only and left_only:
+            return 17  # FIRE_DOWNLEFT
         if down_only:
-            if right_only:
-                return 16  # FIRE_DOWNRIGHT
-            if left_only:
-                return 17  # FIRE_DOWNLEFT
-            return 13      # FIRE_DOWN
-
+            return 13  # FIRE_DOWN
         if right_only:
-            return 11      # FIRE_RIGHT
+            return 11  # FIRE_RIGHT
         if left_only:
-            return 12      # FIRE_LEFT
+            return 12  # FIRE_LEFT
+        return 1  # FIRE
 
-        # Fire with no direction keys -> straight FIRE
-        return 1
-
-    # Movement (no fire)
+    if up_only and right_only:
+        return 6  # UPRIGHT
+    if up_only and left_only:
+        return 7  # UPLEFT
     if up_only:
-        if right_only:
-            return 6   # UPRIGHT
-        if left_only:
-            return 7   # UPLEFT
-        return 2       # UP
-
+        return 2  # UP
+    if down_only and right_only:
+        return 8  # DOWNRIGHT
+    if down_only and left_only:
+        return 9  # DOWNLEFT
     if down_only:
-        if right_only:
-            return 8   # DOWNRIGHT
-        if left_only:
-            return 9   # DOWNLEFT
-        return 5       # DOWN
-
+        return 5  # DOWN
     if right_only:
-        return 3       # RIGHT
+        return 3  # RIGHT
     if left_only:
-        return 4       # LEFT
+        return 4  # LEFT
 
-    # Conflicting input (e.g. up+down): just NOOP
-    return 0
+    return 0  # Conflicting input
 
 
-def get_model_action(model, stacked_obs: np.ndarray, device):
-    """
-    Greedy action from trained CNN DQN given the stacked observation.
-
-    stacked_obs: (4, 84, 84) numpy array, float32 in [0, 1]
-    """
-    obs_t = torch.from_numpy(stacked_obs).unsqueeze(0).to(device)  # (1, 4, 84, 84)
+def get_model_action(model, stacked_obs: np.ndarray, device, deterministic: bool = True):
+    """Get action from PPO model."""
+    obs_t = torch.from_numpy(stacked_obs).unsqueeze(0).to(device)
     with torch.no_grad():
-        q_values = model(obs_t)
-    return int(q_values.argmax(dim=1).item())
+        policy_logits, _ = model(obs_t)
+        if deterministic:
+            action = policy_logits.argmax(dim=1).item()
+        else:
+            probs = torch.softmax(policy_logits, dim=-1)
+            action = torch.multinomial(probs, 1).item()
+    return int(action)
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Play against trained PPO model")
+    parser.add_argument(
+        "--weights",
+        type=str,
+        default="ppo_tank_final.pth",
+        help="Path to model weights",
+    )
+    parser.add_argument(
+        "--stochastic",
+        action="store_true",
+        help="Use stochastic policy (sample actions) instead of greedy",
+    )
+    args = parser.parse_args()
+
     pygame.init()
-    pygame.display.set_caption("Combat Tank - Human vs DQN")
+    pygame.display.set_caption("Combat Tank - Human vs PPO")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # --- Create parallel PettingZoo env (both agents visible) ---
+    # Create environment
     env = combat_tank_v2.parallel_env(
         obs_type="rgb_image",
         full_action_space=True,
         render_mode="rgb_array",
     )
 
-    # Reset env
     try:
         obs_dict, info = env.reset(seed=0)
     except TypeError:
         obs_dict = env.reset()
 
     agents = env.agents
-    if len(agents) < 2:
-        print("Expected at least 2 agents in combat_tank_v2.")
-        env.close()
-        pygame.quit()
-        sys.exit(1)
-
-    # Decide who is who
-    # We'll let the model control 'first_0' and the human control 'second_0'
     model_agent = "first_0"
     human_agent = "second_0"
+
     if model_agent not in agents or human_agent not in agents:
-        # Fallback: just use the first two agents
         model_agent, human_agent = agents[0], agents[1]
 
-    # --- Build frame stack for model agent and load trained model ---
-    example_frame = obs_dict[model_agent]          # (H, W, 3)
-    frame_proc = preprocess_obs(example_frame)     # (1, 84, 84)
-    model_stack = np.repeat(frame_proc, STACK_SIZE, axis=0)  # (4, 84, 84)
+    # Initialize frame stack
+    example_frame = obs_dict[model_agent]
+    frame_proc = preprocess_obs(example_frame)
+    model_stack = np.repeat(frame_proc, STACK_SIZE, axis=0)
 
     num_actions = env.action_space(model_agent).n
 
-    # Model was trained with in_channels = 4
-    model = SimpleDQNCNN(in_channels=STACK_SIZE, num_actions=num_actions).to(device)
-    state_dict = torch.load(WEIGHTS_PATH, map_location=device)
+    # Load PPO model
+    model = ActorCritic(in_channels=STACK_SIZE, num_actions=num_actions).to(device)
+
+    weights_path = args.weights
+    if not os.path.isabs(weights_path):
+        # Check in current dir and parent dir
+        if os.path.exists(weights_path):
+            pass
+        elif os.path.exists(os.path.join("..", weights_path)):
+            weights_path = os.path.join("..", weights_path)
+        else:
+            print(f"Could not find weights file: {args.weights}")
+            print("Available .pth files:")
+            for f in os.listdir(".."):
+                if f.endswith(".pth"):
+                    print(f"  {f}")
+            sys.exit(1)
+
+    state_dict = torch.load(weights_path, map_location=device)
     model.load_state_dict(state_dict)
     model.eval()
-    print(f"Loaded trained model from {WEIGHTS_PATH}")
+    print(f"Loaded PPO model from {weights_path}")
     print(f"Model controls: {model_agent}, You control: {human_agent}")
+    print(f"Policy: {'stochastic' if args.stochastic else 'deterministic'}")
 
-    # --- Set up pygame window based on rendered frame ---
-    frame = env.render()  # (H, W, 3)
-    if frame is None:
-        print("env.render() returned None. Make sure render_mode='rgb_array'.")
-        env.close()
-        pygame.quit()
-        sys.exit(1)
-
+    # Setup pygame window
+    frame = env.render()
     base_h, base_w = frame.shape[0], frame.shape[1]
     win_w, win_h = base_w * SCALE, base_h * SCALE
     screen = pygame.display.set_mode((win_w, win_h))
     clock = pygame.time.Clock()
 
-    running = True
-    print("Controls: Arrow keys / WASD to move, SPACE to fire. ESC or close window to quit.")
+    print("\nControls: Arrow keys / WASD to move, SPACE to fire, ESC to quit")
+    print("-" * 50)
 
-    # --- Play episodes forever until user quits ---
+    running = True
+    games_played = 0
+    human_wins = 0
+    model_wins = 0
+
     while running:
-        # Start a new episode
         try:
             obs_dict, info = env.reset()
         except TypeError:
             obs_dict = env.reset()
 
-        # Reset model's frame stack using first observation of this episode
-        first_model_frame = obs_dict[model_agent]
-        frame_proc = preprocess_obs(first_model_frame)         # (1, 84, 84)
-        model_stack = np.repeat(frame_proc, STACK_SIZE, axis=0)  # (4, 84, 84)
+        first_frame = obs_dict[model_agent]
+        frame_proc = preprocess_obs(first_frame)
+        model_stack = np.repeat(frame_proc, STACK_SIZE, axis=0)
 
         done = False
-        episode_reward_model = 0.0
-        episode_reward_human = 0.0
+        model_score = 0.0
+        human_score = 0.0
 
         while not done and running:
-            # Handle events
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     running = False
@@ -221,38 +224,32 @@ def main():
             if not running:
                 break
 
-            # Get current obs for each agent
-            model_frame = obs_dict[model_agent]
-            human_frame = obs_dict[human_agent]  # not actually needed, but here if you want HUD later
-
-            # Human action from keyboard
             human_action = get_human_action()
-
-            # Model action from stacked CNN input
-            model_action = get_model_action(model, model_stack, device)
+            model_action = get_model_action(
+                model, model_stack, device, deterministic=not args.stochastic
+            )
 
             actions = {
-                model_agent: int(model_action),
-                human_agent: int(human_action),
+                model_agent: model_action,
+                human_agent: human_action,
             }
 
             obs_dict, rewards, terminations, truncations, infos = env.step(actions)
 
-            # Accumulate rewards (raw env rewards, not shaped)
-            episode_reward_model += float(rewards.get(model_agent, 0.0))
-            episode_reward_human += float(rewards.get(human_agent, 0.0))
+            model_score += float(rewards.get(model_agent, 0.0))
+            human_score += float(rewards.get(human_agent, 0.0))
 
-            # Update model frame stack with new frame
-            new_model_frame = obs_dict[model_agent]
-            new_proc = preprocess_obs(new_model_frame)  # (1, 84, 84)
-            model_stack = np.concatenate([model_stack[1:], new_proc], axis=0)  # (4, 84, 84)
+            new_frame = obs_dict[model_agent]
+            new_proc = preprocess_obs(new_frame)
+            model_stack = np.concatenate([model_stack[1:], new_proc], axis=0)
 
-            # Check if episode ended
-            done_model = bool(terminations.get(model_agent, False) or truncations.get(model_agent, False))
-            done_human = bool(terminations.get(human_agent, False) or truncations.get(human_agent, False))
-            done = done_model or done_human
+            done = bool(
+                terminations.get(model_agent, False)
+                or truncations.get(model_agent, False)
+                or terminations.get(human_agent, False)
+                or truncations.get(human_agent, False)
+            )
 
-            # Render frame
             frame = env.render()
             if frame is not None:
                 surf = pygame.surfarray.make_surface(np.transpose(frame, (1, 0, 2)))
@@ -260,16 +257,30 @@ def main():
                 screen.blit(surf, (0, 0))
                 pygame.display.flip()
 
-            clock.tick(30)  # Limit FPS so humans can react
+            clock.tick(30)
 
         if running:
+            games_played += 1
+            if human_score > model_score:
+                human_wins += 1
+                result = "YOU WIN!"
+            elif model_score > human_score:
+                model_wins += 1
+                result = "Model wins"
+            else:
+                result = "Draw"
+
             print(
-                f"Episode finished | model({model_agent}) reward: {episode_reward_model:.2f}, "
-                f"you({human_agent}) reward: {episode_reward_human:.2f}"
+                f"Game {games_played}: {result} | "
+                f"You: {human_score:.0f}, Model: {model_score:.0f} | "
+                f"Overall: You {human_wins}-{model_wins} Model"
             )
 
     env.close()
     pygame.quit()
+
+    print("\n" + "=" * 50)
+    print(f"Final score: You {human_wins} - {model_wins} Model")
 
 
 if __name__ == "__main__":
