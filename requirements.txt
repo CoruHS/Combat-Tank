@@ -1,0 +1,8 @@
+# Warning: This works only for Python 3.11
+
+torch==2.9.0+cu130
+numpy==1.26.4
+opencv-python==4.11.0
+pygame==2.6.1
+pettingzoo==1.24.4
+AutoROM[accept-rom-license]
